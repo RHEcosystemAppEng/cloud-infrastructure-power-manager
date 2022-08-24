@@ -136,7 +136,8 @@ function ask_rule_type () {
   Weekends
   Nights
   Weekends-Nights
-  None
+  Certificate
+  Clean
   "
   rule=$(_opt_selector "Select a rule" "$opts")
 }
@@ -156,8 +157,8 @@ function lambda_function_exists () {
   return $?
 }
 
-# Creates every available rule for lambda function in AWS EventBridge
-function lambda_rule_create () {
+# Creates lambda rule for certificate renewal based on the input expiration date
+function lambda_rule_cert_create () {
   read \
     -p "Enter the Certification Expiration date: " \
     exp_date
@@ -171,7 +172,11 @@ function lambda_rule_create () {
     --tags "{\"Key\": \"${lambda_function_name}\",\"Value\": \"owned\"}" \
     | jq -r '.RuleArn'
   )
+}
 
+
+# Creates every available rule for lambda function in AWS EventBridge
+function lambda_rule_create () {
   wk_off_rule_arn=$(aws events put-rule \
     --name ${lambda_function_name}_weekend_off \
     --description "OCP lab power manager rule to trigger power off before weekends" \
@@ -272,6 +277,12 @@ function lambda_function_trigger_cert_renewal_delete () {
     --rule ${lambda_function_name}_cert_on_${cluster_tag_name} \
     --ids "$cluster_tag_name" \
     &>/dev/null
+
+  # If cert_on_rule already exists, get the ARN
+  if [[ -z $cert_on_rule_arn ]]; then
+    cert_on_rule_arn=$(aws events describe-rule --name ${lambda_function_name}_cert_on_${cluster_tag_name} | jq -r '.Arn')
+  fi
+
   aws lambda remove-permission \
     --function-name $lambda_function_name \
     --statement-id "$(basename $(awk -F ":" '{print $6}' <<< $cert_on_rule_arn))" \
@@ -380,19 +391,16 @@ function lambda_function_trigger_create () {
   target_ec2_ids_json_action_off=$(jq -c '. += {"action":"off"}' <<< $target_ec2_ids_json | sed 's/"/\\"/g')
   target_ec2_ids_json_action_on=$(jq -c '. += {"action":"on"}' <<< $target_ec2_ids_json | sed 's/"/\\"/g')
 
-  lambda_function_trigger_weekends_delete
-  lambda_function_trigger_nights_delete
-
-  lambda_function_trigger_cert_renewal_delete
-  lambda_function_trigger_cert_renewal_create
 
   case $rule in
     Weekends)
       echo "Creating Lambda Triggers for Weekends"
+      lambda_function_trigger_nights_delete
       lambda_function_trigger_weekends_create
       ;;
     Nights)
       echo "Creating Lambda Triggers for Nights"
+      lambda_function_trigger_weekends_delete
       lambda_function_trigger_nights_create
       ;;
     Weekends-Nights)
@@ -400,8 +408,16 @@ function lambda_function_trigger_create () {
       lambda_function_trigger_weekends_create
       lambda_function_trigger_nights_create
       ;;
-    None)
+    Certificate)
+      echo "Creating Lambda Triggers just for certificate Renewal"
+      lambda_rule_cert_create
+      lambda_function_trigger_cert_renewal_create
+      ;;
+    Clean)
       echo "Deleting every Lambda Trigger"
+      lambda_function_trigger_weekends_delete
+      lambda_function_trigger_nights_delete
+      lambda_function_trigger_cert_renewal_delete
       ;;
     *)
       echo "Not recognised option"
